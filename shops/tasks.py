@@ -1,11 +1,26 @@
 import requests
 from yaml import load as load_yaml, Loader
+from django.conf import settings
+from django.core.mail import EmailMultiAlternatives
 from django.core.validators import URLValidator
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from orders.celery import app
 
 from .models import Shop, Category, Product, Parameter, ProductParameter, ProductInfo
+
+
+@app.task()
+def send_email(title, message, email, *args, **kwargs):
+    email_list = list()
+    email_list.append(email)
+    try:
+        msg = EmailMultiAlternatives(subject=title, body=message, from_email=settings.EMAIL_HOST_USER, to=email_list)
+        msg.send()
+        return f'{title}: {msg.subject}, Message:{msg.body}'
+    except Exception as e:
+        raise e
+
 
 @app.task()
 def get_import(partner, url):

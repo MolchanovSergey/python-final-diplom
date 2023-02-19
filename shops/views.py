@@ -1,67 +1,69 @@
-from distutils.util import strtobool
+import requests
+from yaml import load as load_yaml, Loader
+from django.conf import settings
+from django.core.mail import EmailMultiAlternatives
+from django.core.validators import URLValidator
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError
-from django.http import JsonResponse
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework.views import APIView
-from .models import Shop
-from .serializers import ShopSerializer
-from .tasks import get_import
+from orders.celery import app
+
+from .models import Shop, Category, Product, Parameter, ProductParameter, ProductInfo
 
 
-class PartnerUpdate(APIView):
-    """
-    Класс для обновления прайса от поставщика
-    """
-
-    def post(self, request, *args, **kwargs):
-        if not request.user.is_authenticated:
-            return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=status.HTTP_403_FORBIDDEN)
-
-        if request.user.type != 'shop':
-            return JsonResponse({'Status': False, 'Error': 'For shops only'}, status=status.HTTP_403_FORBIDDEN)
-
-        url = request.data.get('url')
-        if url:
-            try:
-                task = get_import.delay(request.user.id, url)
-            except IntegrityError as e:
-                return JsonResponse({'Status': False,
-                                     'Errors': f'Integrity Error: {e}'})
-
-            return JsonResponse({'Status': True}, status=status.HTTP_200_OK)
-
-        return JsonResponse({'Status': False, 'Errors': 'All necessary arguments are not specified'},
-                        status=status.HTTP_400_BAD_REQUEST)
+@app.task()
+def send_email(title, message, email, *args, **kwargs):
+    email_list = list()
+    email_list.append(email)
+    try:
+        msg = EmailMultiAlternatives(subject=title, body=message, from_email=settings.EMAIL_HOST_USER, to=email_list)
+        msg.send()
+        return f'{title}: {msg.subject}, Message:{msg.body}'
+    except Exception as e:
+        raise e
 
 
-class PartnerState(APIView):
-    """
-    Класс для работы со статусом поставщика
-    """
-    permission_classes = [IsAuthenticated]
+@app.task()
+def get_import(partner, url):
+    if url:
+        validate_url = URLValidator()
+        try:
+            validate_url(url)
+        except ValidationError as e:
+            return {'Status': False, 'Error': str(e)}
+        else:
+            stream = requests.get(url).content
 
-    def get(self, request, *args, **kwargs):
-        if request.user.type != 'shop':
-            return JsonResponse({'Status': False, 'Error': 'For shops only'}, status=status.HTTP_403_FORBIDDEN)
+        data = load_yaml(stream, Loader=Loader)
+        try:
+            shop, _ = Shop.objects.get_or_create(name=data['shop'],
+                                             user_id=partner)
+        except IntegrityError as e:
+            return {'Status': False, 'Error': str(e)}
 
-        shop = request.user.shop
-        serializer = ShopSerializer(shop)
-        return Response(serializer.data)
+        for category in data['categories']:
+            category_object, _ = Category.objects.get_or_create(
+                id=category['id'], name=category['name'])
+            category_object.shops.add(shop.id)
+            category_object.save()
 
-    def post(self, request, *args, **kwargs):
-        if request.user.type != 'shop':
-            return JsonResponse({'Status': False, 'Error': 'For shop only'}, status=status.HTTP_403_FORBIDDEN)
-        state = request.data.get('state')
-        if state:
-            try:
-                Shop.objects.filter(user_id=request.user.id).update(state=strtobool(state))
-                return JsonResponse({'Status': True}, status=status.HTTP_200_OK)
-            except ValueError as error:
-                return JsonResponse({'Status': False, 'Errors': str(error)})
-
-        return JsonResponse({'Status': False, 'Errors': 'All necessary arguments are not specified'})
-
-
-
+        ProductInfo.objects.filter(shop_id=shop.id).delete()
+        for item in data['goods']:
+            product, _ = Product.objects.get_or_create(
+                name=item['name'], category_id=item['category']
+            )
+            product_info = ProductInfo.objects.create(
+                product_id=product.id, external_id=item['id'],
+                model=item['model'], price=item['price'],
+                price_rrc=item['price_rrc'], quantity=item['quantity'],
+                shop_id=shop.id
+            )
+            for name, value in item['parameters'].items():
+                parameter_object, _ = Parameter.objects.get_or_create(
+                    name=name
+                )
+                ProductParameter.objects.create(
+                    product_info_id=product_info.id,
+                    parameter_id=parameter_object.id, value=value
+                )
+        return {'Status': True}
+    return {'Status': False, 'Errors': 'Url is false'}
