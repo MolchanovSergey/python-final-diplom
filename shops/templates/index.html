@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>API Сервис заказа товаров для розничных сетей</title>
+</head>
+<body>
+    <h1>Список товаров</h1>
+<ul>
+    {% for pr in product %}
+        <li>{{ pr.product }}</li>
+    {% endfor %}
+</ul>
+</body>
+</html>
+
+
+
+
